@@ -48,3 +48,13 @@
 2026-10-27 13:31:55,929 INFO report written to C:\Users\Hiten Mandhyan\Desktop\Projects\air_quality_pipeline\reports
 2026-10-27 13:31:56,125 INFO archived 15 rows, deleted 0 old raw files
 2026-10-27 13:31:56,137 INFO run finished: success
+2026-10-27 15:14:15,102 INFO collected 72 rows for Delhi
+2026-10-27 15:14:20,422 INFO collected 72 rows for Mumbai
+2026-10-27 15:14:21,549 INFO collected 72 rows for Bengaluru
+2026-10-27 15:14:22,883 INFO collected 72 rows for Kolkata
+2026-10-27 15:14:24,751 INFO collected 72 rows for Chennai
+2026-10-27 15:14:25,086 INFO cleaned: 7250 raw -> 7210 clean rows, 0 imputed, 37 outliers
+2026-10-27 15:14:25,232 INFO daily_summary upserted 305 rows
+2026-10-27 15:14:26,482 INFO report written to C:\Users\Hiten Mandhyan\Desktop\Projects\air_quality_pipeline\reports
+2026-10-27 15:14:26,645 INFO archived 10 rows, deleted 0 old raw files
+2026-10-27 15:14:26,658 INFO run finished: success
