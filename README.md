@@ -4,6 +4,12 @@ An automated Python pipeline that collects hourly air-quality data for five Indi
 
 A small forecasting experiment (next-day PM2.5) is included, with an honest evaluation (see [Forecast experiment](#forecast-experiment)).
 
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-storage-003B57?logo=sqlite&logoColor=white)
+![pandas](https://img.shields.io/badge/pandas-transform-150458?logo=pandas&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)
+![Plotly](https://img.shields.io/badge/Plotly-charts-3F4F75?logo=plotly&logoColor=white)
+
 ## Team and my contribution
 
 CHRIST University (Delhi NCR), 5 BCA A, *Data Engineering* course project. Team: **Hiten Mandhyan, Naman Jiwnani, Tejas Kashyap**.
@@ -18,7 +24,10 @@ CHRIST University (Delhi NCR), 5 BCA A, *Data Engineering* course project. Team:
 |---|---|---|
 | `docs/screenshot-bulletin.png` (to add) | `docs/screenshot-lifecycle.png` (to add) | `docs/screenshot-trends.png` (to add) |
 
-Sample generated charts are in [reports/](reports/) (`daily_pm25.png`, `hourly_profile.png`) with the written summary in [reports/summary.md](reports/summary.md).
+Sample generated charts (written summary in [reports/summary.md](reports/summary.md)):
+
+![Daily PM2.5](reports/daily_pm25.png)
+![Hourly profile](reports/hourly_profile.png)
 
 ## Architecture
 
@@ -138,3 +147,7 @@ Streamlit Cloud has no persistent disk, so the SQLite file lives only as long as
 - SQLite is fine for one writer; a shared deployment would need PostgreSQL.
 - Hourly rows older than 60 days leave the working tables (by design), so hourly charts cover about 60 days while daily aggregates are kept indefinitely.
 - The in-progress current day appears in the daily summary with fewer than 24 hours; the forecast excludes it, `analyze()` does not.
+
+---
+
+Built by [Hiten Mandhyan](https://github.com/Hit3nDev) with Naman Jiwnani and Tejas Kashyap.
