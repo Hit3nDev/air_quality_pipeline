@@ -1,5 +1,7 @@
-requests
-pandas
-matplotlib
-streamlit
-plotly
+requests==2.34.2
+pandas==2.3.3
+numpy==2.2.6
+matplotlib==3.10.5
+streamlit==1.50.0
+plotly==7.1.0
+scikit-learn==1.7.2

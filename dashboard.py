@@ -1,5 +1,4 @@
-import sqlite3, subprocess, sys
-from datetime import datetime
+import json, sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -7,10 +6,23 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import bootstrap
+import pipeline
+
 BASE = Path(__file__).parent
-DB, RAW_DIR, REPORT_DIR = BASE / "data" / "air_quality.db", BASE / "data" / "raw", BASE / "reports"
-LIMIT = 60                                    # India NAAQS 24-hour PM2.5 standard, µg/m³
-EVENTS = {"Diwali": "2026-11-08"}             # edit or add dates to mark on the trend chart
+DB, RAW_DIR, REPORT_DIR = bootstrap.db_path(), pipeline.RAW_DIR, pipeline.REPORT_DIR
+LIMIT = pipeline.NAAQS_PM25                   # India NAAQS 24-hour PM2.5 standard, µg/m³
+
+
+def load_events():
+    """Dates to mark on the trend chart, from events.json: [{"name": "...", "date": "YYYY-MM-DD"}, ...]."""
+    try:
+        return {e["name"]: e["date"] for e in json.loads((BASE / "events.json").read_text(encoding="utf-8"))}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+EVENTS = load_events()
 
 INK, SMOKE, PAPER, RULE, LIMIT_RED = "#2B3138", "#6B7480", "#EEF1F3", "#C9CFD4", "#7A1F2B"
 # µg/m³ -> colour. Blue is clear air, amber is the legal limit, brown and soot beyond it.
@@ -84,8 +96,26 @@ def tidy(fig, h):
     return fig
 
 # ---------- data ----------
-if not DB.exists():
-    st.markdown("## Nothing to show yet"); st.write("Run `python pipeline.py --backfill` once, then reload this page."); st.stop()
+@st.cache_data(ttl=3600, show_spinner="Fetching the last 90 days of air-quality data from Open-Meteo (about 30 seconds)...")
+def ensure_data(db_path: str):
+    """Rebuild the database when it is missing or its last successful run is over 24 h old. Cached for an hour,
+    so most page loads skip even the freshness check. Failures raise, so they are never cached."""
+    return bootstrap.ensure_database(Path(db_path))
+
+
+stale_notice = None
+try:
+    ensure_data(str(DB))
+except pipeline.PipelineError as e:
+    if not bootstrap.has_data(DB):
+        st.markdown("## Nothing to show yet")
+        st.error(f"Could not fetch data from Open-Meteo: {e}")
+        st.stop()
+    stale_notice = f"Could not refresh the data ({e}). Showing the last data we have."
+if stale_notice:
+    st.warning(stale_notice)
+
+
 def q(sql, **kw):
     with sqlite3.connect(DB) as con: return pd.read_sql(sql, con, **kw)
 daily = q("SELECT * FROM daily_summary", parse_dates=["date"])
@@ -103,11 +133,15 @@ with st.sidebar:
     st.markdown("Settings")
     focus = st.selectbox("City to examine", cities)
     window = st.slider("Days shown in trends", 14, 92, 60)
-    if st.button("Refresh data", use_container_width=True):
+    if st.button("Refresh data", width="stretch"):
         with st.spinner("Collecting, cleaning, summarising…"):
-            r = subprocess.run([sys.executable, "pipeline.py"], cwd=BASE, capture_output=True, text=True)
-        if r.returncode: st.error(r.stderr[-600:])
-        st.rerun()
+            try:
+                bootstrap.build_database(DB, days=2)          # incremental: last two days only
+            except pipeline.PipelineError as e:
+                st.error(f"Refresh failed: {e}")
+            else:
+                ensure_data.clear()
+                st.rerun()
     if not runs.empty:
         st.caption(f"Last refresh {runs.iloc[0].finished_at[:16].replace('T', ' ')}")
 
@@ -158,7 +192,7 @@ st.markdown(f'<p class="advice">By the US AQI scale, the air in {worst} is curre
 st.markdown("## How the data moves through its lifecycle")
 st.markdown('<p class="sub">Each figure is read live from the pipeline\'s own database and folders, so this rail is '
             'the pipeline describing itself rather than a diagram of it.</p>', unsafe_allow_html=True)
-fresh_h = (datetime.now() - reading_time).total_seconds() / 3600
+fresh_h = (pipeline.now_ist() - reading_time).total_seconds() / 3600
 stops = [("1 Collect", f"{len(cities)}", "cities polled hourly from the Open-Meteo air quality service"),
          ("2 Store", f"{n.raw:,}", f"raw hourly rows, plus {len(list(RAW_DIR.glob('*.json')))} untouched JSON snapshots"),
          ("3 Clean", f"{n.clean:,}", f"rows kept; {n.imputed} short gaps filled, {n.outliers} outliers flagged"),
@@ -197,7 +231,7 @@ with c2:
     qd = pd.DataFrame({"Complete": (clean.groupby("city").size() / span * 100).clip(upper=100).round(1).astype(str) + " %",
                        "Gaps filled": clean.groupby("city").was_imputed.sum(),
                        "Outliers": clean.groupby("city").is_outlier.sum()})
-    st.dataframe(qd, use_container_width=True)
+    st.dataframe(qd, width="stretch")
     st.caption("A gap is filled only when it is three hours or shorter. An outlier is a reading more than three standard "
                "deviations from the city's rolling seven-day mean; it is kept in the store but excluded from analysis.")
 
@@ -219,7 +253,7 @@ for name, day in EVENTS.items():
                       annotation_text=name, annotation_position="top left", annotation_font_color=SMOKE)
 fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1], font=dict(family="Newsreader, Georgia, serif", size=15), textangle=0, x=0, xanchor="left"))
 fig.update_yaxes(title=None, matches="y"); fig.update_xaxes(title=None)
-st.plotly_chart(tidy(fig, 120 * len(cities) + 40), use_container_width=True)
+st.plotly_chart(tidy(fig, 120 * len(cities) + 40))
 
 # ---------- when is it worst ----------
 st.markdown(f"## When {focus} is worst")
@@ -230,7 +264,7 @@ with c1:
     hm = px.imshow(pv, color_continuous_scale=SCALE, zmin=0, zmax=VMAX, aspect="auto",
                    labels=dict(color="µg/m³", x="hour of day", y=""), **PLOT)
     hm.update_layout(coloraxis_colorbar=dict(thickness=8, len=.8, title=None))
-    st.plotly_chart(tidy(hm, 300), use_container_width=True)
+    st.plotly_chart(tidy(hm, 300))
 with c2:
     prof = h.groupby("hour").pm2_5.mean()
     wk = h.groupby(h.time.dt.dayofweek >= 5).pm2_5.mean()
@@ -241,7 +275,7 @@ with c2:
                 unsafe_allow_html=True)
     over = (daily.assign(o=daily.avg_pm2_5 > LIMIT).groupby("city").o.mean() * 100).sort_values(ascending=False)
     st.markdown("**Share of days over the limit**")
-    st.dataframe(over.round(0).astype(int).astype(str).add(" %").rename("Days").to_frame(), use_container_width=True)
+    st.dataframe(over.round(0).astype(int).astype(str).add(" %").rename("Days").to_frame(), width="stretch")
 
 # ---------- calendar ----------
 st.markdown("## The whole record, one square per day")
@@ -249,7 +283,7 @@ cal = daily.pivot(index="city", columns="date", values="avg_pm2_5").reindex(citi
 fig = go.Figure(go.Heatmap(z=cal.values, x=cal.columns, y=cal.index, colorscale=SCALE, zmin=0, zmax=VMAX, xgap=2, ygap=6,
                            showscale=False, hovertemplate="%{y}, %{x|%d %b}: %{z:.0f} µg/m³<extra></extra>"))
 fig.update_yaxes(autorange="reversed")
-st.plotly_chart(tidy(fig, 50 + 34 * len(cities)), use_container_width=True)
+st.plotly_chart(tidy(fig, 50 + 34 * len(cities)))
 
 # ---------- record keeping ----------
 st.markdown("## Record keeping")
@@ -259,14 +293,14 @@ with c1:
     st.dataframe(runs[["started_at", "rows_collected", "rows_cleaned", "rows_archived", "status"]].head(12)
                  .rename(columns={"started_at": "Started", "rows_collected": "Collected", "rows_cleaned": "Cleaned",
                                   "rows_archived": "Archived", "status": "Result"}),
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
 with c2:
     st.markdown("**Take the data with you**")
-    st.download_button("Download daily summary", daily.to_csv(index=False), "daily_summary.csv", use_container_width=True)
-    st.download_button("Download hourly readings", hourly.to_csv(index=False), "clean_readings.csv", use_container_width=True)
+    st.download_button("Download daily summary", daily.to_csv(index=False), "daily_summary.csv", width="stretch")
+    st.download_button("Download hourly readings", hourly.to_csv(index=False), "clean_readings.csv", width="stretch")
     rep = REPORT_DIR / "summary.md"
     if rep.exists():
-        st.download_button("Download written report", rep.read_text(encoding="utf-8"), "summary.md", use_container_width=True)
+        st.download_button("Download written report", rep.read_text(encoding="utf-8"), "summary.md", width="stretch")
     st.caption("Retention: hourly rows older than 60 days move to the archive table, raw JSON older than 30 days is deleted, "
                "and daily aggregates are kept indefinitely.")
 
