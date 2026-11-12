@@ -2,6 +2,8 @@
 
 An automated Python pipeline that collects hourly air-quality data for five Indian cities (Delhi, Mumbai, Bengaluru, Kolkata, Chennai), cleans and aggregates it in SQLite, measures it against India's PM2.5 legal limit, and serves the results in an interactive Streamlit dashboard. It covers the full data lifecycle: collect, store, clean, transform, analyse, share, archive, with every run audited.
 
+**Live demo: https://airlens-aqi.streamlit.app** (free hosting: if it has been idle, the first load shows a "wake up" button and takes about 30 seconds to rebuild its data)
+
 A small forecasting experiment (next-day PM2.5) is included, with an honest evaluation (see [Forecast experiment](#forecast-experiment)).
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
@@ -137,7 +139,7 @@ Holdout 2026-10-29 to 2026-11-11, 70 predictions (5 cities Ã— 14 days), MAE in Â
 
 1. Push the repository to GitHub (the database, raw data and logs are git-ignored; the app rebuilds them).
 2. On [share.streamlit.io](https://share.streamlit.io) choose *Create app*, pick the repo and branch, set **Main file path** to `dashboard.py`, and under *Advanced settings* choose Python 3.11 or 3.12.
-3. Deploy. The first load takes about 30 seconds while it fetches 90 days from Open-Meteo; afterwards the page is served from cache and refreshes its data once a day.
+3. Deploy (this project's instance: https://airlens-aqi.streamlit.app). The first load takes about 30 seconds while it fetches 90 days from Open-Meteo; afterwards the page is served from cache and refreshes its data once a day.
 
 Streamlit Cloud has no persistent disk, so the SQLite file lives only as long as the container; that is why the app rebuilds it on demand.
 
