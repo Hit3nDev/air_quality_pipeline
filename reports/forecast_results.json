@@ -1,0 +1,61 @@
+{
+  "holdout_days": 14,
+  "n_test_predictions": 70,
+  "data_start": "2026-07-27",
+  "data_end": "2026-11-11",
+  "test_start": "2026-10-29",
+  "test_end": "2026-11-11",
+  "overall": {
+    "mae_persistence": 10.928571428571429,
+    "mae_mean7": 20.975102040816328,
+    "mae_ridge": 11.377880993437355
+  },
+  "per_city": {
+    "Bengaluru": {
+      "n_train": 87,
+      "n_test": 14,
+      "test_start": "2026-10-29",
+      "test_end": "2026-11-11",
+      "mae_persistence": 5.278571428571429,
+      "mae_mean7": 12.10918367346939,
+      "mae_ridge": 5.174763539384377
+    },
+    "Chennai": {
+      "n_train": 87,
+      "n_test": 14,
+      "test_start": "2026-10-29",
+      "test_end": "2026-11-11",
+      "mae_persistence": 8.657142857142857,
+      "mae_mean7": 17.401020408163266,
+      "mae_ridge": 7.6857040816582645
+    },
+    "Delhi": {
+      "n_train": 87,
+      "n_test": 14,
+      "test_start": "2026-10-29",
+      "test_end": "2026-11-11",
+      "mae_persistence": 20.671428571428574,
+      "mae_mean7": 31.85816326530612,
+      "mae_ridge": 24.033824473466318
+    },
+    "Kolkata": {
+      "n_train": 87,
+      "n_test": 14,
+      "test_start": "2026-10-29",
+      "test_end": "2026-11-11",
+      "mae_persistence": 15.299999999999999,
+      "mae_mean7": 36.28877551020408,
+      "mae_ridge": 13.555173212041854
+    },
+    "Mumbai": {
+      "n_train": 87,
+      "n_test": 14,
+      "test_start": "2026-10-29",
+      "test_end": "2026-11-11",
+      "mae_persistence": 4.735714285714285,
+      "mae_mean7": 7.218367346938775,
+      "mae_ridge": 6.43993966063597
+    }
+  },
+  "computed_at_ist": "2026-11-12T21:04:13"
+}
