@@ -146,3 +146,14 @@ def test_analyze_survives_data_covering_only_weekend_days(con, tmp_path):
     pipeline.transform(con)
     pipeline.analyze(con, tmp_path)
     assert "Weekday vs weekend" in (tmp_path / "summary.md").read_text(encoding="utf-8")
+
+
+def test_cli_exits_non_zero_when_the_run_fails(tmp_path, monkeypatch, no_sleep):
+    """cron / GitHub Actions rely on the exit code to notice a failed run."""
+    monkeypatch.setattr(pipeline, "DB", tmp_path / "x.db")
+    monkeypatch.setattr(pipeline, "setup_logging", lambda: None)
+    monkeypatch.setattr(pipeline.sys, "argv", ["pipeline.py"])
+    script_api(monkeypatch, [requests.ConnectionError("net down")] * 100)
+    with pytest.raises(SystemExit) as exc:
+        pipeline.main()
+    assert exc.value.code == 1
