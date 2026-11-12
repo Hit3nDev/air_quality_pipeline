@@ -5,7 +5,7 @@ Stages: 1 Collect -> 2 Store -> 3 Clean -> 4 Transform -> 5 Analyze -> 6 Archive
 First run : python pipeline.py --backfill   (pulls last 92 days)
 Later runs: python pipeline.py              (pulls last 2 days, incremental)
 """
-import argparse, json, logging, sqlite3
+import argparse, json, logging, sqlite3, sys, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,9 +28,21 @@ RETENTION_DAYS = 60        # hourly rows older than this move to archive_reading
 RAW_FILE_KEEP_DAYS = 30    # raw JSON snapshots older than this are deleted
 NAAQS_PM25 = 60            # India 24-h PM2.5 standard, µg/m³
 
+BACKFILL_DAYS = 92         # Open-Meteo's maximum past_days
+MAX_RETRIES = 4            # attempts per API call (waits 2s, 4s, 8s between them)
+BACKOFF_SECONDS = 2
+RETRY_STATUS = {429, 500, 502, 503, 504}   # transient HTTP errors worth retrying; other 4xx are our fault
 MAX_FILL_HOURS = 3         # gaps up to this many hours are interpolated; longer gaps are dropped
 IST = timezone(timedelta(hours=5, minutes=30))   # API timestamps are Asia/Kolkata (no DST)
 log = logging.getLogger("aq")
+
+
+class PipelineError(Exception):
+    """Expected, explainable pipeline failure (as opposed to a bug)."""
+
+
+class FetchError(PipelineError):
+    """The Open-Meteo API could not give us usable data."""
 
 
 def setup_logging():
@@ -71,15 +83,55 @@ def aqi_category(aqi):
 
 
 # ---------------- stage 1 + 2: collect & store ----------------
+def _validate(city, payload):
+    h = payload.get("hourly") if isinstance(payload, dict) else None
+    if not isinstance(h, dict) or "time" not in h or any(v not in h for v in VARS):
+        raise FetchError(f"{city}: response has no usable 'hourly' block (keys: {list(payload)[:5] if isinstance(payload, dict) else type(payload).__name__})")
+    if any(len(h[v]) != len(h["time"]) for v in VARS):
+        raise FetchError(f"{city}: hourly arrays have different lengths")
+
+
+def fetch_city(city, lat, lon, past_days, retries=MAX_RETRIES, backoff=BACKOFF_SECONDS, sleep=None):
+    """GET one city from Open-Meteo, retrying transient failures with exponential backoff."""
+    params = {"latitude": lat, "longitude": lon, "hourly": ",".join(VARS),
+              "past_days": past_days, "forecast_days": 1, "timezone": "Asia/Kolkata"}
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(API, params=params, timeout=30)
+            r.raise_for_status()
+            payload = r.json()
+            _validate(city, payload)          # a schema problem is not transient: raises FetchError, no retry
+            return payload
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last = e
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code not in RETRY_STATUS:
+                raise FetchError(f"{city}: HTTP {code}, not retryable") from e
+            last = e
+        except ValueError as e:               # body was not valid JSON (e.g. a proxy error page)
+            last = e
+        if attempt < retries:
+            wait = backoff * 2 ** (attempt - 1)
+            log.warning("%s: attempt %d/%d failed (%s: %s); retrying in %ss",
+                        city, attempt, retries, type(last).__name__, last, wait)
+            (sleep or time.sleep)(wait)
+    raise FetchError(f"{city}: gave up after {retries} attempts ({type(last).__name__}: {last})") from last
+
+
 def collect(con, past_days, raw_dir=RAW_DIR):
+    """Fetch every city. Returns (rows_stored, {city: error}). One failing city does not stop the others;
+    FetchError is raised only if every city failed."""
     raw_dir.mkdir(parents=True, exist_ok=True)
-    total, now = 0, datetime.now(timezone.utc).isoformat(timespec="seconds")
+    total, failed, now = 0, {}, datetime.now(timezone.utc).isoformat(timespec="seconds")
     for city, (lat, lon) in CITIES.items():
-        params = {"latitude": lat, "longitude": lon, "hourly": ",".join(VARS),
-                  "past_days": past_days, "forecast_days": 1, "timezone": "Asia/Kolkata"}
-        r = requests.get(API, params=params, timeout=30)
-        r.raise_for_status()
-        payload = r.json()
+        try:
+            payload = fetch_city(city, lat, lon, past_days)
+        except FetchError as e:
+            log.error("collect failed: %s", e)
+            failed[city] = str(e)
+            continue
         # keep an immutable raw snapshot (data lake style)
         (raw_dir / f"{city}_{now[:19].replace(':', '-')}.json").write_text(json.dumps(payload))
         h = payload["hourly"]
@@ -88,7 +140,9 @@ def collect(con, past_days, raw_dir=RAW_DIR):
         total += len(rows)
         log.info("collected %d rows for %s", len(rows), city)
     con.commit()
-    return total
+    if len(failed) == len(CITIES):
+        raise FetchError("every city failed: " + "; ".join(failed.values()))
+    return total, failed
 
 
 # ---------------- stage 3: clean ----------------
@@ -165,8 +219,8 @@ def analyze(con, report_dir=REPORT_DIR):
     L += [f"## % of days above India NAAQS limit ({NAAQS_PM25} µg/m³)", exceed.to_string(), ""]
 
     hourly["weekend"] = hourly.time.dt.dayofweek >= 5
-    wk = hourly.groupby(["city", "weekend"])["pm2_5"].mean().unstack().round(1)
-    wk.columns = ["weekday", "weekend"]
+    wk = hourly.groupby(["city", "weekend"])["pm2_5"].mean().unstack().reindex(columns=[False, True]).round(1)
+    wk.columns = ["weekday", "weekend"]       # reindex keeps both columns even if data covers only one kind of day
     L += ["## Weekday vs weekend PM2.5", wk.to_string(), ""]
 
     hourly["hour"] = hourly.time.dt.hour
@@ -205,30 +259,53 @@ def archive(con, now=None, raw_dir=RAW_DIR):
 
 
 # ---------------- orchestration ----------------
+def record_run(con, started, stats, status, msg):
+    con.rollback()                       # never leave a half-finished transaction behind a failure
+    con.execute("INSERT INTO pipeline_runs (started_at,finished_at,rows_collected,rows_cleaned,"
+                "rows_archived,status,message) VALUES (?,?,?,?,?,?,?)",
+                (started, now_ist().isoformat(timespec="seconds"), stats.get("collected", 0),
+                 stats.get("cleaned", 0), stats.get("archived", 0), status, msg))
+    con.commit()
+
+
+def run(con, past_days=2, raw_dir=RAW_DIR, report_dir=REPORT_DIR, now=None):
+    """Run all stages once and audit the outcome in pipeline_runs.
+    Returns "success", "partial" (some cities failed) or "failed"."""
+    con.executescript(SCHEMA)
+    started, stats, status, msg, stage = now_ist().isoformat(timespec="seconds"), {}, "success", "", "collect"
+    try:
+        stats["collected"], failed = collect(con, past_days, raw_dir)
+        if failed:
+            status, msg = "partial", "cities failed: " + "; ".join(failed.values())
+            log.warning(msg)
+        stage = "clean"; stats["cleaned"] = clean(con, now)
+        stage = "transform"; transform(con)
+        stage = "analyze"; analyze(con, report_dir)
+        stage = "archive"; stats["archived"] = archive(con, now, raw_dir)
+    except (PipelineError, sqlite3.Error, OSError) as e:   # failures we understand: audit and report
+        status, msg = "failed", f"{stage}: {type(e).__name__}: {e}"
+        log.error("pipeline failed at %s: %s", stage, e)
+    except Exception as e:                                  # a bug: still audit it, then let it crash loudly
+        record_run(con, started, stats, "failed", f"{stage}: {type(e).__name__}: {e}")
+        log.exception("unexpected error at %s", stage)
+        raise
+    record_run(con, started, stats, status, msg)
+    log.info("run finished: %s", status)
+    return status
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backfill", action="store_true", help="pull last 92 days instead of 2")
+    ap.add_argument("--backfill", action="store_true", help=f"pull last {BACKFILL_DAYS} days instead of 2")
     args = ap.parse_args()
     setup_logging()
     DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB)
-    con.executescript(SCHEMA)
-    started, stats, status, msg = datetime.now().isoformat(timespec="seconds"), {}, "success", ""
     try:
-        stats["collected"] = collect(con, 92 if args.backfill else 2)
-        stats["cleaned"] = clean(con)
-        transform(con)
-        analyze(con)
-        stats["archived"] = archive(con)
-    except Exception as e:
-        status, msg = "failed", str(e)
-        log.exception("pipeline failed")
-    con.execute("INSERT INTO pipeline_runs (started_at,finished_at,rows_collected,rows_cleaned,"
-                "rows_archived,status,message) VALUES (?,?,?,?,?,?,?)",
-                (started, datetime.now().isoformat(timespec="seconds"), stats.get("collected", 0),
-                 stats.get("cleaned", 0), stats.get("archived", 0), status, msg))
-    con.commit(); con.close()
-    log.info("run finished: %s", status)
+        status = run(con, BACKFILL_DAYS if args.backfill else 2)
+    finally:
+        con.close()
+    sys.exit(1 if status == "failed" else 0)    # non-zero exit lets cron / CI notice a failed run
 
 
 if __name__ == "__main__":

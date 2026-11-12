@@ -35,8 +35,8 @@ def count(con, table="raw_readings"):
 
 
 def test_collect_inserts_one_row_per_city_hour(con, mock_api, tmp_path):
-    total = pipeline.collect(con, 2, raw_dir=tmp_path)
-    assert total == 5 * 24 and count(con) == 5 * 24
+    total, failed = pipeline.collect(con, 2, raw_dir=tmp_path)
+    assert total == 5 * 24 and count(con) == 5 * 24 and failed == {}
     assert len(mock_api["calls"]) == 5                       # one request per city
     assert mock_api["calls"][0]["past_days"] == 2
 
