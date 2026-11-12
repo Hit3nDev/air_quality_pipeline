@@ -28,11 +28,20 @@ RETENTION_DAYS = 60        # hourly rows older than this move to archive_reading
 RAW_FILE_KEEP_DAYS = 30    # raw JSON snapshots older than this are deleted
 NAAQS_PM25 = 60            # India 24-h PM2.5 standard, µg/m³
 
-for d in (RAW_DIR, REPORT_DIR):
-    d.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-                    handlers=[logging.FileHandler(BASE / "pipeline.log"), logging.StreamHandler()])
+MAX_FILL_HOURS = 3         # gaps up to this many hours are interpolated; longer gaps are dropped
+IST = timezone(timedelta(hours=5, minutes=30))   # API timestamps are Asia/Kolkata (no DST)
 log = logging.getLogger("aq")
+
+
+def setup_logging():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=[logging.FileHandler(BASE / "pipeline.log"), logging.StreamHandler()])
+
+
+def now_ist():
+    """Current wall-clock time in India as a naive datetime, matching the API's timestamps.
+    Using the machine's own clock would be wrong on UTC servers (CI, Streamlit Cloud)."""
+    return datetime.now(IST).replace(tzinfo=None)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_readings (
@@ -62,7 +71,8 @@ def aqi_category(aqi):
 
 
 # ---------------- stage 1 + 2: collect & store ----------------
-def collect(con, past_days):
+def collect(con, past_days, raw_dir=RAW_DIR):
+    raw_dir.mkdir(parents=True, exist_ok=True)
     total, now = 0, datetime.now(timezone.utc).isoformat(timespec="seconds")
     for city, (lat, lon) in CITIES.items():
         params = {"latitude": lat, "longitude": lon, "hourly": ",".join(VARS),
@@ -71,7 +81,7 @@ def collect(con, past_days):
         r.raise_for_status()
         payload = r.json()
         # keep an immutable raw snapshot (data lake style)
-        (RAW_DIR / f"{city}_{now[:19].replace(':', '-')}.json").write_text(json.dumps(payload))
+        (raw_dir / f"{city}_{now[:19].replace(':', '-')}.json").write_text(json.dumps(payload))
         h = payload["hourly"]
         rows = [(city, t, *(h[v][i] for v in VARS), now) for i, t in enumerate(h["time"])]
         con.executemany("INSERT OR REPLACE INTO raw_readings VALUES (?,?,?,?,?,?,?)", rows)
@@ -82,15 +92,24 @@ def collect(con, past_days):
 
 
 # ---------------- stage 3: clean ----------------
-def clean(con):
+def fill_short_gaps(s, limit=MAX_FILL_HOURS):
+    """Linearly interpolate runs of missing values that are at most `limit` long.
+    Longer runs are left entirely missing (pandas' own `limit=` would fill their first `limit` hours)."""
+    isna = s.isna()
+    run_len = isna.groupby((~isna).cumsum()).transform("sum")   # length of the NaN run each NaN sits in
+    return s.where(~(isna & (run_len <= limit)), s.interpolate(limit_area="inside"))
+
+
+def clean(con, now=None):
+    now = pd.Timestamp(now if now is not None else now_ist())
     df = pd.read_sql("SELECT city,time,pm2_5,pm10,nitrogen_dioxide,us_aqi FROM raw_readings",
                      con, parse_dates=["time"])
     before = len(df)
-    df = df[df["time"] <= pd.Timestamp.now()]                       # drop forecast hours
+    df = df[df["time"] <= now]                       # drop forecast hours
     df = df.drop_duplicates(["city", "time"]).sort_values(["city", "time"]).reset_index(drop=True)
     df[VARS] = df[VARS].mask(df[VARS] < 0)                          # negatives are sensor errors
     df["was_imputed"] = df[VARS].isna().any(axis=1).astype(int)
-    df[VARS] = df.groupby("city")[VARS].transform(lambda s: s.interpolate(limit=3))  # fill gaps <= 3h
+    df[VARS] = df.groupby("city")[VARS].transform(fill_short_gaps)  # fill gaps <= 3h
     df = df.dropna(subset=VARS)                                     # longer gaps stay dropped
 
     def zflag(s):  # > 3 sigma from a centred 7-day rolling mean
@@ -128,12 +147,13 @@ def transform(con):
 
 
 # ---------------- stage 5: analyze ----------------
-def analyze(con):
+def analyze(con, report_dir=REPORT_DIR):
+    report_dir.mkdir(parents=True, exist_ok=True)
     daily = pd.read_sql("SELECT * FROM daily_summary", con, parse_dates=["date"])
     hourly = pd.read_sql("SELECT city,time,pm2_5 FROM clean_readings WHERE is_outlier=0",
                          con, parse_dates=["time"])
     if daily.empty: return
-    L = [f"# Air Quality Report\nGenerated {datetime.now():%Y-%m-%d %H:%M}\n"]
+    L = [f"# Air Quality Report\nGenerated {now_ist():%Y-%m-%d %H:%M} IST\n"]
 
     rank = daily.groupby("city")["avg_pm2_5"].mean().sort_values(ascending=False).round(1)
     L += ["## Average PM2.5 by city (µg/m³)", rank.to_string(), ""]
@@ -152,30 +172,31 @@ def analyze(con):
     hourly["hour"] = hourly.time.dt.hour
     prof = hourly.groupby(["hour", "city"])["pm2_5"].mean().unstack()
     L += ["## Peak pollution hour per city", prof.idxmax().to_string(), ""]
-    (REPORT_DIR / "summary.md").write_text("\n".join(L), encoding="utf-8")
+    (report_dir / "summary.md").write_text("\n".join(L), encoding="utf-8")
 
     fig, ax = plt.subplots(figsize=(11, 5))
     for city, g in daily.groupby("city"): ax.plot(g["date"], g["avg_pm2_5"], label=city)
     ax.axhline(NAAQS_PM25, ls="--", c="grey", lw=1, label="NAAQS limit")
     ax.set(title="Daily average PM2.5", ylabel="µg/m³"); ax.legend(); fig.autofmt_xdate()
-    fig.tight_layout(); fig.savefig(REPORT_DIR / "daily_pm25.png", dpi=120); plt.close(fig)
+    fig.tight_layout(); fig.savefig(report_dir / "daily_pm25.png", dpi=120); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(9, 5))
     prof.plot(ax=ax); ax.set(title="Average PM2.5 by hour of day", xlabel="hour", ylabel="µg/m³")
-    fig.tight_layout(); fig.savefig(REPORT_DIR / "hourly_profile.png", dpi=120); plt.close(fig)
-    log.info("report written to %s", REPORT_DIR)
+    fig.tight_layout(); fig.savefig(report_dir / "hourly_profile.png", dpi=120); plt.close(fig)
+    log.info("report written to %s", report_dir)
 
 
 # ---------------- stage 6: archive / retention ----------------
-def archive(con):
-    cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M")
+def archive(con, now=None, raw_dir=RAW_DIR):
+    now = now if now is not None else now_ist()
+    cutoff = (now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M")
     n = con.execute("SELECT COUNT(*) FROM raw_readings WHERE time < ?", (cutoff,)).fetchone()[0]
     con.execute("INSERT OR REPLACE INTO archive_readings SELECT * FROM raw_readings WHERE time < ?", (cutoff,))
     con.execute("DELETE FROM raw_readings WHERE time < ?", (cutoff,))
     con.commit()
-    deadline = datetime.now() - timedelta(days=RAW_FILE_KEEP_DAYS)
+    deadline = now - timedelta(days=RAW_FILE_KEEP_DAYS)
     deleted = 0
-    for f in RAW_DIR.glob("*.json"):
+    for f in raw_dir.glob("*.json"):
         if datetime.fromtimestamp(f.stat().st_mtime) < deadline:
             f.unlink(); deleted += 1
     con.execute("VACUUM")
@@ -188,6 +209,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", action="store_true", help="pull last 92 days instead of 2")
     args = ap.parse_args()
+    setup_logging()
+    DB.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB)
     con.executescript(SCHEMA)
     started, stats, status, msg = datetime.now().isoformat(timespec="seconds"), {}, "success", ""
