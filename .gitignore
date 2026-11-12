@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets / local config
+.env
+.streamlit/secrets.toml
+
+# Generated data (rebuilt by `python pipeline.py --backfill`)
+*.db
+*.db-journal
+*.sqlite
+data/raw/*.json
+*.log

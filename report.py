@@ -1,6 +1,6 @@
 """
 Builds AirLens_Project_Report.docx from the live database and report charts.
-Run:  python make_report.py   (after at least one pipeline run)
+Run:  python report.py   (after at least one pipeline run)
 """
 import sqlite3
 from datetime import datetime
